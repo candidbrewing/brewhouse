@@ -172,12 +172,13 @@
   };
 
   screens.pack = function () {
-    setHeader('New packaging run', true);
+    setHeader('Start a packaging run', true);
     var open = CB.openBatches(state());
-    app.innerHTML = open.length
-      ? '<p class="muted">Which tank are you packaging from?</p><div class="tiles">' + open.map(function (b) { return batchTile(b, '#package/' + b.batch); }).join('') + '</div>' +
-        '<p class="muted">Tank not listed? Add the brew first.</p><button class="big alt" data-go="#new">+ New batch</button>'
-      : '<p>No batches in the tanks yet.</p><button class="big" data-go="#new">+ New batch</button>';
+    app.innerHTML = (open.length
+      ? '<p><b>Tap the tank you’re packaging from.</b><br><span class="muted">Next you’ll enter the cans and kegs filled.</span></p><div class="tiles">' +
+        open.map(function (b) { return batchTile(b, '#package/' + b.batch); }).join('') + '</div>'
+      : '<p><b>No tanks are loaded yet.</b><br><span class="muted">They appear here once the app is connected to the Sheet.</span></p>') +
+      '<div style="height:18px"></div><button class="big alt" data-go="#new/pack" style="min-height:64px;font-size:19px">Tank missing? Add it</button>';
     wireGo();
     return { refreshOnSync: true };
   };
@@ -319,8 +320,9 @@
     return { refreshOnSync: true };
   };
 
-  screens['new'] = function () {
-    setHeader('New batch', true);
+  screens['new'] = function (from) {
+    var forPack = from === 'pack';
+    setHeader(forPack ? 'Add the tank you’re packaging from' : 'New batch', true);
     var s = state();
     var f = { batch: CB.nextBatchNumber(s, today()), beer: '', tank: '', volumeHL: '', date: today() };
     var busyTanks = {};
@@ -330,10 +332,10 @@
       '<label class="f">Beer</label><select id="beer">' + beerOptions('') + '</select>' +
       '<input id="beerOther" placeholder="Beer name" style="margin-top:8px" hidden>' +
       '<label class="f">Tank it is in now</label><select id="tank">' + tankOptions('') + '</select>' +
-      '<label class="f">Volume in that tank now (hL)</label><input id="vol" inputmode="decimal" placeholder="e.g. 10">' +
+      '<label class="f">' + (forPack ? 'Volume in the tank before packaging (hL)' : 'Volume in that tank now (hL)') + '</label><input id="vol" inputmode="decimal" placeholder="e.g. 10">' +
       '<p class="muted">Leave blank if you haven’t measured it.</p>' +
       '<label class="f">Brew date</label><input type="date" id="date" value="' + f.date + '" max="' + today() + '">' +
-      '<div id="msg"></div><button class="big" id="save" style="margin-top:18px">Save batch</button>';
+      '<div id="msg"></div><button class="big" id="save" style="margin-top:18px">' + (forPack ? 'Next: cans and kegs' : 'Save batch') + '</button>';
     $('#beer').addEventListener('change', function (e) { $('#beerOther').hidden = e.target.value !== '__other'; });
     $('#save').addEventListener('click', function () {
       f.batch = $('#batch').value.trim(); f.beer = $('#beer').value; f.tank = $('#tank').value;
@@ -350,7 +352,7 @@
       if (!f.date) errs.push('Pick the brew date.');
       if (errs.length) { $('#msg').innerHTML = '<div class="err">' + errs.map(esc).join('<br>') + '</div>'; return; }
       var e = addEvent('batch_new', { batch: f.batch, beer: f.beer, tank: f.tank, volumeHL: f.volumeHL === '' ? '' : parseFloat(f.volumeHL), date: f.date });
-      go('#saved/' + e.id);
+      if (forPack) location.replace('#package/' + f.batch); else go('#saved/' + e.id);
     });
     return {};
   };
