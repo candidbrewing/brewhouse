@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Candid Brewhouse</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Brewhouse">
+<meta name="theme-color" content="#1f1a14">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+  :root {
+    --bg: #f6f1e8; --card: #ffffff; --ink: #1f1a14; --muted: #6b6258;
+    --line: #d9cfc0; --accent: #b8621b; --accent-ink: #ffffff;
+    --ok: #2f7a3e; --warn: #a3650a; --bad: #b3261e;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 19px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--ink); color: #fff;
+    padding: calc(env(safe-area-inset-top) + 10px) 16px 10px; display: flex; align-items: center; gap: 10px; }
+  header .title { font-weight: 700; flex: 1; font-size: 20px; }
+  header button.back { background: none; border: 0; color: #fff; font-size: 30px; padding: 0 8px 0 0; line-height: 1; }
+  .pill { font-size: 15px; padding: 6px 12px; border-radius: 99px; background: #3a3229; white-space: nowrap; }
+  .pill.ok { background: var(--ok); } .pill.wait { background: var(--warn); } .pill.bad { background: var(--bad); }
+  main { padding: 16px 16px calc(env(safe-area-inset-bottom) + 40px); max-width: 640px; margin: 0 auto; }
+  h2 { font-size: 22px; margin: 18px 0 10px; }
+  .muted { color: var(--muted); }
+  .big { display: block; width: 100%; min-height: 84px; font-size: 24px; font-weight: 700;
+    border: 0; border-radius: 16px; background: var(--accent); color: var(--accent-ink); margin: 0 0 14px; }
+  .big.alt { background: var(--card); color: var(--ink); border: 2px solid var(--line); }
+  .big:disabled { opacity: .45; }
+  .row-btns { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row-btns .big { flex: 1 1 45%; min-height: 70px; font-size: 20px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .tile { background: var(--card); border: 2px solid var(--line); border-radius: 16px; padding: 14px;
+    text-align: left; font: inherit; color: inherit; min-height: 110px; }
+  .tile:active, .big:active { transform: scale(.98); }
+  .tile .tank { font-size: 15px; color: var(--muted); font-weight: 600; }
+  .tile .beer { font-size: 22px; font-weight: 700; margin: 2px 0; }
+  .tile .meta { font-size: 16px; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; margin-bottom: 14px; }
+  label.f { display: block; font-weight: 600; margin: 14px 0 6px; }
+  input, select, textarea { font: inherit; font-size: 22px; width: 100%; padding: 12px 14px; border-radius: 12px;
+    border: 2px solid var(--line); background: #fff; color: var(--ink); }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .count { display: grid; grid-template-columns: 1fr 64px 120px 64px; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .count .lbl { font-weight: 600; font-size: 18px; }
+  .count .lbl small { display: block; font-weight: 400; color: var(--muted); font-size: 14px; }
+  .count button { height: 60px; font-size: 30px; border-radius: 12px; border: 2px solid var(--line); background: #fff; color: var(--ink); }
+  .count input { text-align: center; height: 60px; padding: 0 4px; }
+  .sum { background: var(--ink); color: #fff; border-radius: 16px; padding: 14px 16px; margin: 16px 0; }
+  .sum .n { font-size: 32px; font-weight: 800; }
+  .sum .l { font-size: 15px; opacity: .8; }
+  .sum .grid { display: flex; gap: 20px; flex-wrap: wrap; }
+  .warn { background: #fff4e0; border: 2px solid var(--warn); border-radius: 12px; padding: 10px 14px; margin: 10px 0; font-size: 17px; }
+  .err { background: #fde8e6; border: 2px solid var(--bad); border-radius: 12px; padding: 10px 14px; margin: 10px 0; font-size: 17px; }
+  .done { text-align: center; padding: 30px 0; }
+  .done .tick { font-size: 80px; color: var(--ok); line-height: 1; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; background: var(--card); }
+  th, td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+  .scroll { overflow-x: auto; border-radius: 12px; border: 1px solid var(--line); }
+  .list-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .list-item:last-child { border-bottom: 0; }
+  .small-btn { font: inherit; font-size: 16px; padding: 10px 14px; border-radius: 10px; border: 2px solid var(--line); background: #fff; color: var(--ink); }
+  .chip { display: inline-block; font-size: 13px; padding: 2px 8px; border-radius: 99px; background: #eee3d3; color: var(--muted); margin-left: 6px; }
+  .seg { display: flex; gap: 8px; } .seg button { flex: 1; min-height: 60px; font-size: 19px; font-weight: 600;
+    border-radius: 12px; border: 2px solid var(--line); background: #fff; color: var(--ink); }
+  .seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <button class="back" id="back" hidden aria-label="Back">‹</button>
+  <div class="title" id="title">Brewhouse</div>
+  <div class="pill" id="sync">…</div>
+</header>
+<main id="app"></main>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
