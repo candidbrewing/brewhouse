@@ -70,6 +70,7 @@ var CB = (function () {
 
     var batches = {};
     var packaging = [];
+    var counts = [], adjusts = [], moves = [];
     var dumps = [];
     var live = [];
 
@@ -132,6 +133,24 @@ var CB = (function () {
             where: d.where || 'tank', reason: d.reason || '', at: e.at });
           break;
 
+        case 'count': // a submitted stock count: one event, many lines
+          (d.lines || []).forEach(function (l) {
+            counts.push({ id: e.id, date: d.date, area: d.area, spot: l.spot || '', item: l.item,
+              name: l.name || l.item, qty: num(l.qty), unit: l.unit || '', by: e.by || '', at: e.at });
+          });
+          break;
+
+        case 'adjust': // give-away or write-off
+          adjusts.push({ id: e.id, date: d.date, area: d.area, item: d.item, name: d.name || d.item,
+            qty: num(d.qty), unit: d.unit || '', reason: d.reason || '', approvedBy: d.approvedBy || '',
+            note: d.note || '', by: e.by || '', at: e.at });
+          break;
+
+        case 'move': // stock moved between places, e.g. walk-in -> retail fridge
+          moves.push({ id: e.id, date: d.date, item: d.item, name: d.name || d.item, qty: num(d.qty),
+            unit: d.unit || '', from: d.from, to: d.to, by: e.by || '', at: e.at });
+          break;
+
         case 'combine': // d.from poured into d.into
           var from = get(d.from), into = get(d.into);
           var moved = num(d.volumeHL);
@@ -146,7 +165,47 @@ var CB = (function () {
     });
 
     packaging.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
-    return { batches: batches, packaging: packaging, dumps: dumps, events: live, voided: voided };
+    return { batches: batches, packaging: packaging, dumps: dumps, events: live, voided: voided,
+      counts: counts, adjusts: adjusts, moves: moves };
+  }
+
+  // ---------- stock ----------
+  // Finished-goods formats, used wherever beer is counted (walk-in, retail fridge, market).
+  var BEER_FORMATS = [
+    { key: 'c473', label: '473 mL cans', unit: 'cans', pack: 24, packName: 'flats' },
+    { key: 'c355', label: '355 mL cans', unit: 'cans', pack: 24, packName: 'flats' },
+    { key: 'k20', label: '20 L kegs (full)', unit: 'kegs' },
+    { key: 'k50', label: '50 L kegs (full)', unit: 'kegs' },
+    { key: 'k58', label: '58.6 L kegs (full)', unit: 'kegs' },
+  ];
+  var ADJUST_REASONS = ['Comp / give-away', 'Staff beer', 'Donation', 'Promo / sample',
+    'Damaged', 'Expired / spoiled', 'Other'];
+  var AREAS = {
+    brewery: { label: 'Brewery stock', who: 'Bryan', often: 'monthly' },
+    taproom: { label: 'Taproom stock', who: 'Allie', often: 'weekly' },
+    market: { label: 'Market count', who: 'anyone at the market', often: 'end of each market day' },
+  };
+  function beerItemId(beer, fmt) { return 'beer:' + beer + ':' + fmt; }
+
+  // Beers worth showing on a count: the regular list plus anything packaged in the last 180 days.
+  function beerNames(state) {
+    var names = BEERS.map(function (b) { return b.name; });
+    var cutoff = new Date(Date.now() - 180 * 864e5).toISOString().slice(0, 10);
+    (state.packaging || []).forEach(function (r) {
+      if (r.date >= cutoff && r.beer && names.indexOf(r.beer) < 0) names.push(r.beer);
+    });
+    return names;
+  }
+
+  // Latest submitted count per item for one area: { itemId: {qty, date} }
+  function lastCounts(state, area) {
+    var out = {};
+    (state.counts || []).forEach(function (c) {
+      if (c.area !== area) return;
+      var prev = out[c.item];
+      if (!prev || c.date > prev.date || (c.date === prev.date && c.at > prev.at)) out[c.item] = c;
+    });
+    return out;
   }
 
   function openBatches(state) {
@@ -181,6 +240,8 @@ var CB = (function () {
     hlOf: hlOf, round: round, beerIsExcise: beerIsExcise, validBatch: validBatch,
     reduce: reduce, openBatches: openBatches, nextBatchNumber: nextBatchNumber,
     monthSummary: monthSummary,
+    BEER_FORMATS: BEER_FORMATS, ADJUST_REASONS: ADJUST_REASONS, AREAS: AREAS,
+    beerItemId: beerItemId, beerNames: beerNames, lastCounts: lastCounts,
   };
 })();
 

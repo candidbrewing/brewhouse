@@ -9,7 +9,9 @@
     get: function (k, d) { try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } },
     set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
   };
-  var settings = LS.get('cb.settings', { url: '', key: '', by: 'Bryan' });
+  // The Sheet's web address isn't secret; the access code is what guards it, and that is typed on each phone.
+  var SHEET_URL = 'https://script.google.com/macros/s/AKfycbxu1wDWYPdkCJ8ZNG2wf7GrJuRnLCixUZGsWNhp4XMIgzG_h9ImgLTSdw0_mkGlrlE5/exec';
+  var settings = LS.get('cb.settings', { url: '', key: '', by: '' });
   var serverEvents = LS.get('cb.server', []);   // last copy received from the Sheet
   var pending = LS.get('cb.pending', []);       // saved on the phone, not yet sent
   var syncState = { busy: false, error: '', last: LS.get('cb.lastSync', '') };
@@ -35,6 +37,7 @@
   // ---------- sync ----------
   function apiUrl() {
     if (settings.url) return settings.url;
+    if (/github\.io$/.test(location.hostname)) return settings.key ? SHEET_URL : '';
     if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return '/api'; // test server
     return '';
   }
@@ -53,6 +56,8 @@
       .then(function (res) {
         if (!res.ok) throw new Error(res.error || 'Server refused the entries');
         serverEvents = res.events || [];
+        if (res.role) LS.set('cb.role', res.role);
+        if (res.items) LS.set('cb.items', res.items);
         var have = {};
         serverEvents.forEach(function (e) { have[e.id] = true; });
         pending = pending.filter(function (e) { return !have[e.id]; });
@@ -153,16 +158,22 @@
   // ---------- screens ----------
   var screens = {};
 
+  function role() { return LS.get('cb.role', ''); }
+
   screens.home = function () {
+    if (role() && role() !== 'brewer') return screens.stock();
     setHeader('Candid Brewhouse', false);
     var s = state();
     var open = CB.openBatches(s);
     app.innerHTML =
       '<button class="big" data-go="#pack">Packaging day</button>' +
       '<button class="big alt" disabled>Brew day <span class="chip">coming next</span></button>' +
+      '<button class="big alt" data-go="#stock">Stock counts</button>' +
       '<h2>In the tanks</h2>' +
       (open.length ? '<div class="tiles">' + open.map(function (b) { return batchTile(b, '#batch/' + b.batch); }).join('') + '</div>'
-        : '<p class="muted">No batches yet. Add the ones in the tanks now.</p>') +
+        : (!settings.key && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+          ? '<div class="warn"><b>Not connected yet.</b> Tap <b>Settings</b> below and enter the access code. The tanks appear once it’s saved.</div>'
+          : '<p class="muted">No tanks loaded yet.</p>')) +
       '<div style="height:14px"></div><button class="big alt" data-go="#new">+ New batch</button>' +
       '<div class="row-btns"><button class="big alt" data-go="#recent">Recent entries</button>' +
       '<button class="big alt" data-go="#report">Month report</button></div>' +
@@ -503,12 +514,14 @@
     setHeader('Settings', true);
     app.innerHTML =
       '<label class="f">Your name</label><input id="by" value="' + esc(settings.by) + '">' +
-      '<label class="f">Sheet link (from Louise)</label><input id="url" value="' + esc(settings.url) + '" placeholder="https://script.google.com/…" autocapitalize="off" autocorrect="off">' +
       '<label class="f">Access code (from Louise)</label><input id="key" value="' + esc(settings.key) + '" autocapitalize="off" autocorrect="off">' +
+      '<details style="margin-top:14px"><summary class="muted">Advanced</summary><label class="f">Sheet link (leave blank)</label><input id="url" value="' + esc(settings.url) + '" placeholder="built in" autocapitalize="off" autocorrect="off"></details>' +
       '<div style="height:18px"></div><button class="big" id="save">Save and send now</button>' +
       '<p class="muted">' + pending.length + ' entries waiting on this phone. Last sent: ' + (syncState.last ? new Date(syncState.last).toLocaleString() : 'never') + '</p>';
     $('#save').addEventListener('click', function () {
-      settings = { by: $('#by').value.trim(), url: $('#url').value.trim(), key: $('#key').value.trim() };
+      var newKey = $('#key').value.trim();
+      if (newKey !== settings.key) { LS.set('cb.role', ''); serverEvents = []; saveLocal(); }
+      settings = { by: $('#by').value.trim(), url: $('#url').value.trim(), key: newKey };
       LS.set('cb.settings', settings); sync(); go('#home');
     });
     return {};
@@ -535,6 +548,17 @@
 
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(function () {});
+  }
+
+  // Stock screens live in stock.js and share these helpers.
+  if (window.CBStock) {
+    window.CBStock({
+      screens: screens, app: app, esc: esc, go: go, $: $, $$: $$, wireGo: wireGo, setHeader: setHeader,
+      state: state, addEvent: addEvent, today: today, LS: LS, render: function () { render(); }, role: role,
+      items: function () { return LS.get('cb.items', []); },
+      allEvents: function () { return serverEvents.concat(pending); },
+      isPending: function (id) { return pending.some(function (p) { return p.id === id; }); },
+    });
   }
 
   render();
