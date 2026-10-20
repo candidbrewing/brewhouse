@@ -63,14 +63,40 @@ var CB = (function () {
 
   function validBatch(b) { return /^\d{5}$/.test(String(b)); }
 
-  // Replay events -> { batches, packaging, dumps, events }
+  // ---------- units ----------
+  // How many of the stock unit one entry unit is worth, e.g. stock in kg, entered in g -> 0.001.
+  var UNIT_FAMILY = { kg: { kg: 1, g: 0.001 }, g: { g: 1, kg: 1000 }, L: { L: 1, mL: 0.001 }, mL: { mL: 1, L: 1000 } };
+  function entryUnits(stockUnit) { var f = UNIT_FAMILY[stockUnit]; return f ? Object.keys(f) : [stockUnit]; }
+  // Amount in "unit" -> amount in the item's stock unit; null when the two don't convert (never guessed).
+  function toStockUnit(qty, unit, stockUnit) {
+    if (qty === '' || qty == null) return null;
+    if (unit === stockUnit) return num(qty);
+    var f = UNIT_FAMILY[stockUnit];
+    return f && f[unit] != null ? round(num(qty) * f[unit], 6) : null;
+  }
+
+  // Every stock line a brew draws: malt, hops & kettle additions, other additions, and a new yeast brick.
+  function brewLines(d) {
+    var lines = [].concat(d.malts || [], d.hops || [], d.others || []);
+    if (d.yeast && d.yeast.item && d.yeast.source === 'new') lines.push(d.yeast);
+    return lines;
+  }
+
+  var STEPS = ['Dry hop', 'Crop yeast', 'Transfer to brite', 'Package', 'Other'];
+
+  // Replay events -> { batches, packaging, dumps, events, ... }
   function reduce(events) {
     var voided = {};
-    events.forEach(function (e) { if (e.type === 'void') voided[e.data.target] = true; });
+    events.forEach(function (e) {
+      if (e.type === 'void') voided[e.data.target] = true;
+      else if (e.data && e.data.replaces) voided[e.data.replaces] = true; // an edit replaces the old entry
+    });
 
     var batches = {};
     var packaging = [];
     var counts = [], adjusts = [], moves = [];
+    var brews = [], uses = [], receives = [], readings = [], newItems = [];
+    var plans = {};
     var dumps = [];
     var live = [];
 
@@ -79,6 +105,17 @@ var CB = (function () {
         batch: String(id), beer: '', tank: '', startHL: 0, level: 0,
         packagedHL: 0, lossHL: 0, status: 'open', runs: [], notes: [],
         combinedInto: '', receivedFrom: [],
+        brews: [], additions: [], readings: [], crops: [],
+      });
+    }
+
+    // Stock drawn by an entry, each line already in the item's own unit (stockQty), or null if it didn't convert.
+    function use(e, d, lines, kind) {
+      (lines || []).forEach(function (l) {
+        if (!l || !l.item) return;
+        uses.push({ id: e.id, date: d.date, at: e.at, batch: d.batch ? String(d.batch) : '', kind: kind,
+          item: l.item, name: l.name || l.item, qty: num(l.qty), unit: l.unit || '',
+          stockQty: l.stockQty == null || l.stockQty === '' ? null : num(l.stockQty), stockUnit: l.stockUnit || '' });
       });
     }
 
@@ -87,7 +124,58 @@ var CB = (function () {
       live.push(e);
       var d = e.data || {};
       var b;
+      if (d.plan && plans[d.plan] && e.type !== 'plan' && !plans[d.plan].done) plans[d.plan].done = d.date || String(e.at).slice(0, 10);
       switch (e.type) {
+        case 'brew': // one brew day; a batch can have two (double brew, or a sour finished on day 2)
+          b = get(d.batch);
+          if (!b.beer) b.beer = d.beer || '';
+          if (!b.tank && d.fermenter) b.tank = d.fermenter;
+          if (!b.date) b.date = d.date;
+          // day 2 adds beer: its "into FV" volume is the new total in the tank (not a move, so no loss)
+          if (+d.day > 1 && vol(d.intoHL) != null) { b.level = num(d.intoHL); b.startHL = num(d.intoHL); }
+          b.brews.push({ id: e.id, at: e.at, by: e.by || '', data: d });
+          brews.push({ id: e.id, at: e.at, by: e.by || '', batch: b.batch, beer: d.beer || b.beer, data: d });
+          use(e, d, brewLines(d), 'brew');
+          break;
+
+        case 'addition': // dry hop, fruit, finings... after brew day
+          b = get(d.batch);
+          b.additions.push({ id: e.id, date: d.date, kind: d.kind || '', lines: d.lines || [], note: d.note || '', by: e.by || '' });
+          use(e, d, d.lines, 'addition');
+          break;
+
+        case 'reading':
+          b = get(d.batch);
+          var rd = { id: e.id, batch: b.batch, date: d.date, time: d.time || '', gravity: d.gravity || '', temp: d.temp || '',
+            ph: d.ph || '', note: d.note || '', by: e.by || '', at: e.at };
+          b.readings.push(rd); readings.push(rd);
+          break;
+
+        case 'crop': // yeast harvested from this batch for a later repitch
+          b = get(d.batch);
+          b.crops.push({ id: e.id, date: d.date, yeast: d.yeast || '', amount: d.amount || '', note: d.note || '', by: e.by || '' });
+          readings.push({ id: e.id, batch: b.batch, date: d.date, time: '', gravity: '', temp: '', ph: '',
+            note: 'Cropped ' + (d.yeast || 'yeast') + (d.amount ? ', ' + d.amount : '') + (d.note ? ' — ' + d.note : ''), by: e.by || '', at: e.at });
+          break;
+
+        case 'plan': // a step to do later; shown as due on the phone and put on the Brewhouse calendar
+          plans[e.id] = { id: e.id, batch: String(d.batch), beer: '', step: d.step || 'Other', due: d.due || '',
+            note: d.note || '', done: '', replaces: d.replaces || '' };
+          break;
+
+        case 'plan_done':
+          if (plans[d.plan] && !plans[d.plan].done) plans[d.plan].done = d.date || String(e.at).slice(0, 10);
+          break;
+
+        case 'receive': // a delivery put into stock on the spot (the invoice still sets the price)
+          receives.push({ id: e.id, date: d.date, at: e.at, item: d.item, name: d.name || d.item, qty: num(d.qty), unit: d.unit || '',
+            stockQty: d.stockQty == null || d.stockQty === '' ? null : num(d.stockQty), stockUnit: d.stockUnit || '',
+            supplier: d.supplier || '', note: d.note || '', by: e.by || '' });
+          break;
+
+        case 'item_new': // a new line for the count lists, added from the phone
+          if (d.item && d.item.id) newItems.push(d.item);
+          break;
         case 'batch_new':
           b = get(d.batch);
           b.beer = d.beer; b.tank = d.tank; b.date = d.date;
@@ -122,6 +210,7 @@ var CB = (function () {
           };
           b.runs.push(row);
           packaging.push(row);
+          use(e, d, d.materials, 'package');
           break;
 
         case 'dump':
@@ -165,9 +254,66 @@ var CB = (function () {
     });
 
     packaging.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    Object.keys(plans).forEach(function (k) { plans[k].beer = (batches[plans[k].batch] || {}).beer || ''; });
     return { batches: batches, packaging: packaging, dumps: dumps, events: live, voided: voided,
-      counts: counts, adjusts: adjusts, moves: moves };
+      counts: counts, adjusts: adjusts, moves: moves,
+      brews: brews, uses: uses, receives: receives, readings: readings, plans: plans, newItems: newItems };
   }
+
+  // ---------- running stock ----------
+  // On hand = last count + received since − used since (brews, additions, packaging) − given away since.
+  // "Since" compares the entry's date, then the time it was entered, with the count's.
+  function stockLevels(state, items) {
+    var out = {};
+    function key(date, at) { return String(date || '') + '|' + String(at || ''); }
+    (items || []).forEach(function (it) {
+      out[it.id] = { item: it, counted: null, countKey: '', base: 0, received: 0, used: 0, adjusted: 0, unconverted: 0, onHand: 0 };
+    });
+    (state.counts || []).forEach(function (c) {
+      var o = out[c.item]; if (!o) return;
+      var k = key(c.date, c.at);
+      if (!o.counted || k > o.countKey) { o.counted = c; o.countKey = k; o.base = c.qty; }
+    });
+    function after(o, date, at) { return !o.counted || key(date, at) > o.countKey; }
+    (state.receives || []).forEach(function (r) {
+      var o = out[r.item]; if (!o || !after(o, r.date, r.at)) return;
+      if (r.stockQty == null) o.unconverted++; else o.received += r.stockQty;
+    });
+    (state.uses || []).forEach(function (u) {
+      var o = out[u.item]; if (!o || !after(o, u.date, u.at)) return;
+      if (u.stockQty == null) o.unconverted++; else o.used += u.stockQty;
+    });
+    (state.adjusts || []).forEach(function (a) {
+      var o = out[a.item]; if (o && after(o, a.date, a.at)) o.adjusted += a.qty;
+    });
+    Object.keys(out).forEach(function (k) {
+      var o = out[k];
+      o.received = round(o.received, 4); o.used = round(o.used, 4); o.adjusted = round(o.adjusted, 4);
+      o.onHand = round(o.base + o.received - o.used - o.adjusted, 4);
+    });
+    return out;
+  }
+
+  // The most recent first brew day of a beer, to start the next one from.
+  function lastBrewOf(state, beer) {
+    var list = (state.brews || []).filter(function (r) { return r.beer === beer && String(r.data.day || 1) === '1'; });
+    list.sort(function (a, b) { return key2(a) < key2(b) ? -1 : 1; });
+    function key2(r) { return String(r.data.date) + '|' + String(r.at); }
+    return list.length ? list[list.length - 1] : null;
+  }
+
+  // Steps not done yet, soonest first.
+  function openPlans(state) {
+    return Object.keys(state.plans || {}).map(function (k) { return state.plans[k]; })
+      .filter(function (p) { return !p.done; })
+      .sort(function (a, b) { return a.due < b.due ? -1 : a.due > b.due ? 1 : 0; });
+  }
+
+  function addDays(iso, n) {
+    var d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+  function daysBetween(a, b) { return Math.round((new Date(b + 'T12:00:00Z') - new Date(a + 'T12:00:00Z')) / 864e5); }
 
   // ---------- stock ----------
   // Finished-goods formats, used wherever beer is counted (walk-in, retail fridge, market).
@@ -186,6 +332,15 @@ var CB = (function () {
     market: { label: 'Market count', who: 'anyone at the market', often: 'end of each market day' },
   };
   function beerItemId(beer, fmt) { return 'beer:' + beer + ':' + fmt; }
+
+  // What the retail fridge and the market carry (Louise, 2026-10-19): 355s, except these in 473s too.
+  // 473s are otherwise the NSLC format (Party Line). Sparkling Water isn't sold retail.
+  var RETAIL_473 = ['Big League', 'Golden Pig'];
+  var NOT_RETAIL = ['Sparkling Water'];
+  function retailFormats(beer) {
+    if (NOT_RETAIL.indexOf(beer) >= 0) return [];
+    return RETAIL_473.indexOf(beer) >= 0 ? ['c473', 'c355'] : ['c355'];
+  }
 
   // Beers worth showing on a count: the regular list plus anything packaged in the last 180 days.
   function beerNames(state) {
@@ -241,7 +396,9 @@ var CB = (function () {
     reduce: reduce, openBatches: openBatches, nextBatchNumber: nextBatchNumber,
     monthSummary: monthSummary,
     BEER_FORMATS: BEER_FORMATS, ADJUST_REASONS: ADJUST_REASONS, AREAS: AREAS,
-    beerItemId: beerItemId, beerNames: beerNames, lastCounts: lastCounts,
+    beerItemId: beerItemId, beerNames: beerNames, lastCounts: lastCounts, retailFormats: retailFormats,
+    UNIT_FAMILY: UNIT_FAMILY, entryUnits: entryUnits, toStockUnit: toStockUnit, brewLines: brewLines, STEPS: STEPS,
+    stockLevels: stockLevels, lastBrewOf: lastBrewOf, openPlans: openPlans, addDays: addDays, daysBetween: daysBetween,
   };
 })();
 

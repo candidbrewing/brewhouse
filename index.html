@@ -80,6 +80,19 @@
   .sin input { height: 54px; text-align: center; padding: 0 6px; }
   .sin.two { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .sline:has(.sin.two) { grid-template-columns: 1fr 170px; }
+  .g2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 10px; align-items: end; }
+  .g2 label.f { margin-top: 10px; font-size: 16px; }
+  .big-val { font-size: 20px; font-weight: 700; padding: 12px 0; }
+  .bline { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .bline:last-of-type { border-bottom: 0; }
+  .bline select { font-size: 18px; }
+  .brow { display: flex; gap: 6px; margin-top: 6px; }
+  .brow input, .brow select { font-size: 18px; padding: 10px 8px; min-width: 0; flex: 1 1 0; }
+  .brow input[data-k="qty"] { flex: 1.2 1 0; }
+  .x { flex: 0 0 44px; border-radius: 10px; border: 2px solid var(--line); background: #fff; color: var(--bad); font-size: 24px; }
+  .newitem { display: grid; grid-template-columns: 1fr 90px; gap: 6px; margin-top: 6px; }
+  .newitem button { grid-column: 1 / -1; }
+  textarea { font-size: 18px; }
 </style>
 </head>
 <body>
@@ -91,6 +104,7 @@
 <main id="app"></main>
 <script src="core.js"></script>
 <script src="stock.js"></script>
+<script src="brew.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

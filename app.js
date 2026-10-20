@@ -24,6 +24,13 @@
     return CB.reduce(serverEvents.concat(pending.filter(function (e) { return !seen[e.id]; })));
   }
 
+  // Undo an entry, and anything made together with it (a brew's batch and planned steps).
+  function undo(id) {
+    var e = serverEvents.concat(pending).filter(function (x) { return x.id === id; })[0];
+    addEvent('void', { target: id });
+    ((e && e.data && e.data.linked) || []).forEach(function (t) { addEvent('void', { target: t }); });
+  }
+
   function newId() { return 'e' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
   function addEvent(type, data) {
@@ -72,6 +79,8 @@
         clearTimeout(timer);
         syncState.busy = false; paintSync();
         if (current.refreshOnSync) render();
+        // entries saved while this send was under way go straight away, not on the next 30-second tick
+        if (!syncState.error && pending.some(function (p) { return sending.indexOf(p) < 0; })) sync();
       });
   }
 
@@ -140,6 +149,16 @@
       });
     });
   }
+  // Packaging stock a run uses: the can (printed, or blank + label), a lid per can, a flat per 24 cans.
+  // Kegs are reusable, so a keg uses nothing. Item IDs are column A of the Items tab.
+  var PACK_ITEMS = {
+    c473: ['bre:packaging-storage-empty-cans-473-ml-printed', 'bre:packaging-storage-empty-cans-473-ml-blank'],
+    c355: ['bre:packaging-storage-empty-cans-355-ml-printed', 'bre:packaging-storage-empty-cans-355-ml-blank'],
+    labels: 'bre:packaging-storage-can-labels-for-blank-cans', flats: 'bre:packaging-storage-flats-trays',
+    box8: 'bre:packaging-storage-8-pack-boxes',
+    lids: ['bre:packaging-storage-lids-craft-coast-sleeve-of-600', 'bre:packaging-storage-lids-hart-print-sleeve-of-624'],
+  };
+
   function batchTile(b, href) {
     return '<button class="tile" data-go="' + href + '"><div class="tank">' + esc(b.tank || '—') + ' · ' + esc(b.batch) +
       '</div><div class="beer">' + esc(b.beer || '?') + '</div><div class="meta">' + inTank(b) + '</div></button>';
@@ -157,6 +176,7 @@
 
   // ---------- screens ----------
   var screens = {};
+  var api = {}; // shared with stock.js and brew.js (filled in at the bottom)
 
   function role() { return LS.get('cb.role', ''); }
 
@@ -167,8 +187,9 @@
     var open = CB.openBatches(s);
     app.innerHTML =
       '<button class="big" data-go="#pack">Packaging day</button>' +
-      '<button class="big alt" disabled>Brew day <span class="chip">coming next</span></button>' +
+      '<button class="big" data-go="#brew">Brew day</button>' +
       '<button class="big alt" data-go="#stock">Stock counts</button>' +
+      (api.dueHtml ? api.dueHtml(s, 2) : '') +
       '<h2>In the tanks</h2>' +
       (open.length ? '<div class="tiles">' + open.map(function (b) { return batchTile(b, '#batch/' + b.batch); }).join('') + '</div>'
         : (!settings.key && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)
@@ -178,7 +199,7 @@
       '<div class="row-btns"><button class="big alt" data-go="#recent">Recent entries</button>' +
       '<button class="big alt" data-go="#report">Month report</button></div>' +
       '<button class="big alt" data-go="#settings">Settings</button>';
-    wireGo();
+    wireGo(); if (api.wireDue) api.wireDue();
     return { refreshOnSync: true };
   };
 
@@ -194,7 +215,7 @@
     return { refreshOnSync: true };
   };
 
-  screens.package = function (id) {
+  screens.package = function (id, planId) {
     var b = state().batches[id];
     if (!b) return screens.missing(id);
     setHeader('Packaging run · ' + b.beer, true);
@@ -214,7 +235,7 @@
       '<label class="f">Left in tank after this run (hL)</label>' +
       '<div class="row-btns"><input inputmode="decimal" id="left" placeholder="e.g. 9" style="flex:1 1 50%">' +
       '<button type="button" class="small-btn" id="empty" style="flex:1 1 40%;min-height:56px;font-size:19px">Tank empty (0)</button></div>' +
-      '<div id="live"></div>' +
+      '<div id="live"></div><div id="mats"></div>' +
       '<label class="f">Date packaged</label><input type="date" id="date" value="' + f.date + '" max="' + today() + '">' +
       '<label class="f">Note (optional)</label><input id="note" placeholder="e.g. 2 cases seconds">' +
       '<div id="msg"></div>' +
@@ -242,17 +263,68 @@
       $('#live').innerHTML = h;
     }
 
+    // Packaging used, worked out from the counts; Bryan can change any number.
+    var itemBy = {}, allItems = items();
+    allItems.forEach(function (it) { itemBy[it.id] = it; });
+    var lvl = CB.stockLevels(state(), allItems);
+    var lids = PACK_ITEMS.lids.filter(function (lid) { return itemBy[lid]; });
+    var m = { blank: { c473: false, c355: false }, touched: {}, qty: {},
+      lid: lids.slice().sort(function (x, y) { return (lvl[y] ? lvl[y].onHand : 0) - (lvl[x] ? lvl[x].onHand : 0); })[0] || '' };
+    function cansOf(k) { return parseInt(f.counts[k], 10) || 0; }
+    function matLines() {
+      var out = [];
+      ['c473', 'c355'].forEach(function (k) {
+        if (!cansOf(k)) return;
+        out.push({ key: 'can' + k, item: PACK_ITEMS[k][m.blank[k] ? 1 : 0], qty: cansOf(k) });
+        if (m.blank[k]) out.push({ key: 'lab' + k, item: PACK_ITEMS.labels, qty: cansOf(k) });
+      });
+      var cans = cansOf('c473') + cansOf('c355');
+      if (cans) {
+        out.push({ key: 'lids', item: m.lid, qty: cans });
+        out.push({ key: 'flats', item: PACK_ITEMS.flats, qty: Math.ceil(cansOf('c473') / 24) + Math.ceil(cansOf('c355') / 24) });
+        out.push({ key: 'box8', item: PACK_ITEMS.box8, qty: 0, hint: 'only for souvenir 8-packs' });
+      }
+      return out.filter(function (l) { return itemBy[l.item]; }).map(function (l) {
+        if (m.touched[l.key]) l.qty = m.qty[l.key];
+        return l;
+      });
+    }
+    function drawMats() {
+      var lines = matLines(), el = $('#mats');
+      if (!lines.length) { el.innerHTML = ''; return; }
+      el.innerHTML = '<h2>Packaging used</h2><p class="muted">Taken off stock. Change a number if it was different.</p><div class="card">' +
+        ['c473', 'c355'].filter(function (k) { return cansOf(k); }).map(function (k) {
+          return '<label class="f">' + (k === 'c473' ? '473' : '355') + ' mL cans</label>' + seg('blank_' + k, [['printed', 'Printed'], ['blank', 'Blank + label']], m.blank[k] ? 'blank' : 'printed');
+        }).join('') +
+        (lids.length > 1 ? '<label class="f">Lids</label><select id="lidsel">' + lids.map(function (lid) {
+          return '<option value="' + esc(lid) + '"' + (lid === m.lid ? ' selected' : '') + '>' + esc(itemBy[lid].name) + '</option>';
+        }).join('') + '</select>' : '') +
+        '<div style="height:8px"></div>' + lines.map(function (l) {
+          return '<div class="sline"><div class="sname">' + esc(itemBy[l.item].name) + (l.hint ? '<small>' + esc(l.hint) + '</small>' : '') +
+            '</div><div class="sin"><input inputmode="numeric" data-mat="' + l.key + '" value="' + l.qty + '"></div></div>';
+        }).join('') + '</div>';
+      wireSegs(function (k, v) { m.blank[k.replace('blank_', '')] = v === 'blank'; drawMats(); });
+      var ls = $('#lidsel');
+      if (ls) ls.addEventListener('change', function () { m.lid = ls.value; drawMats(); });
+      $$('[data-mat]').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+          inp.value = inp.value.replace(/[^0-9]/g, '');
+          var k = inp.getAttribute('data-mat'); m.touched[k] = true; m.qty[k] = parseInt(inp.value, 10) || 0;
+        });
+      });
+    }
+
     $$('[data-count]').forEach(function (inp) {
       inp.addEventListener('input', function () {
         inp.value = inp.value.replace(/[^0-9]/g, '');
-        f.counts[inp.getAttribute('data-count')] = inp.value; live();
+        f.counts[inp.getAttribute('data-count')] = inp.value; live(); drawMats();
       });
     });
     function bump(key, dir) {
       var sz = CB.SIZES.filter(function (x) { return x.key === key; })[0];
       var v = Math.max(0, (parseInt(f.counts[key], 10) || 0) + dir * sz.step);
       f.counts[key] = v ? String(v) : '';
-      $('[data-count="' + key + '"]').value = f.counts[key]; live();
+      $('[data-count="' + key + '"]').value = f.counts[key]; live(); drawMats();
     }
     $$('[data-plus]').forEach(function (bt) { bt.addEventListener('click', function () { bump(bt.getAttribute('data-plus'), 1); }); });
     $$('[data-minus]').forEach(function (bt) { bt.addEventListener('click', function () { bump(bt.getAttribute('data-minus'), -1); }); });
@@ -270,7 +342,12 @@
       if (!/^\d{4}-\d{2}-\d{2}$/.test(f.date)) errs.push('Pick the date packaged.');
       else if (f.date > today()) errs.push('The date can’t be in the future.');
       if (errs.length) { $('#msg').innerHTML = '<div class="err">' + errs.map(esc).join('<br>') + '</div>'; return; }
-      var e = addEvent('package', { batch: b.batch, date: f.date, counts: counts, leftHL: parseFloat(f.leftHL), note: f.note });
+      var materials = matLines().filter(function (l) { return l.qty > 0; }).map(function (l) {
+        var it = itemBy[l.item];
+        return { item: it.id, name: it.name, qty: l.qty, unit: it.unit, stockQty: l.qty, stockUnit: it.unit };
+      });
+      var e = addEvent('package', { batch: b.batch, date: f.date, counts: counts, leftHL: parseFloat(f.leftHL), note: f.note,
+        materials: materials, plan: planId || '' });
       go('#saved/' + e.id);
     });
     return {};
@@ -302,7 +379,7 @@
         '<button class="big alt" id="undo">Undo — I made a mistake</button>';
     wireGo();
     var u = $('#undo');
-    if (u) u.addEventListener('click', function () { addEvent('void', { target: eid }); render(); });
+    if (u) u.addEventListener('click', function () { undo(eid); render(); });
     return { refreshOnSync: true };
   };
 
@@ -320,16 +397,72 @@
       (b.status === 'open' ? '<button class="big" data-go="#package/' + b.batch + '">New packaging run</button>' +
         '<div class="row-btns"><button class="big alt" data-go="#move/' + b.batch + '">Moved tank</button>' +
         '<button class="big alt" data-go="#combine/' + b.batch + '">Combine into…</button></div>' +
-        '<button class="big alt" data-go="#dump/' + b.batch + '">Dump</button>' : '') +
+        '<button class="big alt" data-go="#dump/' + b.batch + '">Dump</button>' +
+        '<div class="row-btns"><button class="big alt" data-go="#addition/' + b.batch + '">Dry hop / add</button>' +
+        '<button class="big alt" data-go="#reading/' + b.batch + '">Reading</button></div>' +
+        '<div class="row-btns"><button class="big alt" data-go="#crop/' + b.batch + '">Crop yeast</button>' +
+        '<button class="big alt" data-go="#plan/' + b.batch + '">Plan a step</button></div>' : '') +
+      plansHtml(s, b) + brewsHtml(b) + logHtml(b) +
       '<h2>Packaging runs</h2>' +
       (b.runs.length ? '<div class="card">' + b.runs.map(function (r) {
         return '<div class="list-item"><div><b>' + prettyDate(r.date) + '</b> · ' + esc(countsText(r)) + '<br><span class="muted">' +
           hl(r.hL) + ' hL · left ' + hl(r.leftHL) + ' hL</span></div></div>';
       }).join('') + '</div>' : '<p class="muted">None yet.</p>') +
       '<p class="muted">Packaged in total: ' + hl(b.packagedHL) + ' hL · spillage/loss: ' + hl(b.lossHL) + ' hL</p>';
-    wireGo();
+    wireGo(); if (api.wireDue) api.wireDue();
     return { refreshOnSync: true };
   };
+
+  function plansHtml(s, b) {
+    var list = Object.keys(s.plans).map(function (k) { return s.plans[k]; }).filter(function (p) { return p.batch === b.batch; })
+      .sort(function (x, y) { return x.due < y.due ? -1 : 1; });
+    if (!list.length) return '';
+    return '<h2>Steps</h2><div class="card">' + list.map(function (p) {
+      return '<div class="list-item"><div><b>' + esc(p.step) + '</b> · ' + prettyDate(p.due) + (p.note ? '<br><span class="muted">' + esc(p.note) + '</span>' : '') +
+        (p.done ? '<br><span style="color:var(--ok)">✓ done ' + prettyDate(p.done) + '</span>' : '') + '</div>' +
+        (p.done ? '' : '<div style="display:flex;gap:6px"><button class="small-btn" data-go="#plan/' + b.batch + '/' + p.id + '">Change</button>' +
+          '<button class="small-btn" data-done="' + p.id + '">Done</button></div>') + '</div>';
+    }).join('') + '</div>';
+  }
+  function linesText(list) {
+    return (list || []).map(function (l) {
+      return esc(l.name) + ' ' + l.qty + ' ' + esc(l.unit) + (l.at ? ' @' + esc(l.at) : '') + (l.time ? ' (' + esc(l.time) + ')' : '') + (l.stage ? ' · ' + esc(l.stage) : '');
+    }).join('<br>');
+  }
+  function brewsHtml(b) {
+    if (!b.brews.length) return '';
+    return '<h2>Brew day' + (b.brews.length > 1 ? 's' : '') + '</h2>' + b.brews.map(function (r) {
+      var d = r.data, y = d.yeast;
+      var facts = [['Kettle', d.kettleHL && d.kettleHL + ' hL'], ['Into FV', d.intoHL && d.intoHL + ' hL'], ['O.G.', d.og], ['Kettle gravity', d.kettleGravity],
+        ['Mash pH', d.mashPH], ['Kettle pH', d.kettlePH], ['Strike', d.strikeL && d.strikeL + ' L at ' + (d.strikeTemp || '?') + '°C'],
+        ['Foundation', d.foundationL && d.foundationL + ' L'], ['Mash in', d.mashIn], ['Rest', d.rest && d.rest + (d.restTemp ? ' at ' + d.restTemp + '°C' : '')],
+        ['Recirc', d.recirc], ['Run-off', d.runoff], ['Boil', d.boilMin && d.boilMin + ' min'], ['Water added', d.waterAddL && d.waterAddL + ' L']]
+        .filter(function (x) { return x[1]; });
+      return '<div class="card"><b>Day ' + esc(d.day || 1) + ' · ' + prettyDate(d.date) + '</b> · ' + esc(d.fermenter) +
+        (r.by ? ' · ' + esc(r.by) : '') +
+        '<details style="margin-top:8px"><summary class="muted">Ingredients and process</summary>' +
+        (d.malts && d.malts.length ? '<p><b>Malt</b><br>' + linesText(d.malts) + '</p>' : '') +
+        (d.hops && d.hops.length ? '<p><b>Hops & kettle</b><br>' + linesText(d.hops) + '</p>' : '') +
+        (d.others && d.others.length ? '<p><b>Other additions</b><br>' + linesText(d.others) + '</p>' : '') +
+        (y ? '<p><b>Yeast</b><br>' + esc(y.name) + (y.source === 'new' ? ', new · ' + y.qty + ' ' + esc(y.unit) : ', repitch from ' + esc(y.fromBatch) + (y.use ? ', use ' + esc(y.use) : '')) + '</p>' : '') +
+        (facts.length ? '<p>' + facts.map(function (x) { return esc(x[0]) + ': ' + esc(x[1]); }).join('<br>') + '</p>' : '') +
+        (d.notes ? '<p>' + esc(d.notes) + '</p>' : '') + '</details></div>';
+    }).join('');
+  }
+  function logHtml(b) {
+    var rows = [];
+    b.additions.forEach(function (a) { rows.push({ date: a.date, html: '<b>' + esc(a.kind || 'Addition') + '</b><br>' + linesText(a.lines) + (a.note ? '<br><span class="muted">' + esc(a.note) + '</span>' : '') }); });
+    b.readings.forEach(function (r) {
+      var bits = [r.gravity && 'SG ' + r.gravity, r.temp && r.temp + '°C', r.ph && 'pH ' + r.ph].filter(Boolean).join(' · ');
+      rows.push({ date: r.date, html: (bits ? '<b>' + esc(bits) + '</b>' : '') + (r.note ? (bits ? '<br>' : '') + esc(r.note) : '') });
+    });
+    b.crops.forEach(function (c) { rows.push({ date: c.date, html: '<b>Cropped yeast</b>' + (c.yeast ? ' · ' + esc(c.yeast) : '') + (c.amount ? ' · ' + esc(c.amount) : '') }); });
+    if (!rows.length) return '';
+    rows.sort(function (x, y) { return x.date < y.date ? -1 : 1; });
+    return '<h2>Fermentation log</h2><div class="card">' + rows.map(function (r) {
+      return '<div class="list-item"><div><span class="muted">' + prettyDate(r.date) + '</span><br>' + r.html + '</div></div>';
+    }).join('') + '</div>';
+  }
 
   screens['new'] = function (from) {
     var forPack = from === 'pack';
@@ -368,7 +501,7 @@
     return {};
   };
 
-  screens.move = function (id) {
+  screens.move = function (id, planId) {
     var s = state(); var b = s.batches[id];
     if (!b) return screens.missing(id);
     setHeader('Move ' + b.batch, true);
@@ -387,7 +520,7 @@
       if (vol !== '' && !(parseFloat(vol) > 0)) errs.push('Volume must be a number of hL.');
       else if (tank && CB.TANK_HL[tank] && vol !== '' && parseFloat(vol) > CB.TANK_HL[tank]) errs.push(tank + ' only holds ' + CB.TANK_HL[tank] + ' hL.');
       if (errs.length) { $('#msg').innerHTML = '<div class="err">' + errs.map(esc).join('<br>') + '</div>'; return; }
-      var e = addEvent('transfer', { batch: b.batch, tank: tank, volumeHL: vol === '' ? '' : parseFloat(vol), date: today() });
+      var e = addEvent('transfer', { batch: b.batch, tank: tank, volumeHL: vol === '' ? '' : parseFloat(vol), date: today(), plan: planId || '' });
       go('#saved/' + e.id);
     });
     return {};
@@ -459,6 +592,16 @@
       case 'transfer': return 'Moved ' + d.batch + ' ' + beer + ' to ' + d.tank + (d.volumeHL !== '' ? ', ' + hl(d.volumeHL) + ' hL' : '');
       case 'combine': return 'Combined ' + hl(d.volumeHL) + ' hL of ' + d.from + ' into ' + d.into;
       case 'dump': return 'Dumped ' + hl(d.volumeHL) + ' hL of ' + d.batch + ' ' + beer + ' from the ' + (d.where === 'packaged' ? 'packages' : 'tank') + ': ' + d.reason;
+      case 'brew': return 'Brew day ' + (d.day || 1) + ': ' + d.batch + ' ' + d.beer + ' into ' + d.fermenter + ', ' +
+        CB.brewLines(d).length + (CB.brewLines(d).length === 1 ? ' ingredient' : ' ingredients') + ' taken off stock';
+      case 'addition': return (d.kind || 'Addition') + ' ' + d.batch + ' ' + beer + ': ' + (d.lines || []).map(function (l) { return l.name + ' ' + l.qty + ' ' + l.unit; }).join(', ');
+      case 'reading': return 'Reading ' + d.batch + ' ' + beer + ': ' + [d.gravity && 'SG ' + d.gravity, d.temp && d.temp + '°C', d.ph && 'pH ' + d.ph, d.note].filter(Boolean).join(' · ');
+      case 'crop': return 'Cropped yeast from ' + d.batch + ' ' + beer + (d.amount ? ', ' + d.amount : '');
+      case 'plan': return 'Planned: ' + d.step + ' for ' + d.batch + ' ' + beer + ' on ' + prettyDate(d.due);
+      case 'plan_done': var p = s.plans[d.plan]; return 'Done: ' + (p ? p.step + ' ' + p.batch : 'a planned step');
+      case 'receive': return 'Added to stock: ' + d.name + ' ' + d.qty + ' ' + d.unit + (d.supplier ? ' from ' + d.supplier : '');
+      case 'item_new': return 'New item on the list: ' + (d.item ? d.item.name : '');
+      case 'count': case 'adjust': case 'move': return e.type === 'count' ? 'Stock count, ' + (d.lines || []).length + ' lines' : e.type === 'adjust' ? d.reason + ': ' + d.qty + ' ' + d.name : 'Moved ' + d.qty + ' ' + d.name;
       default: return e.type;
     }
   }
@@ -477,7 +620,7 @@
     $$('[data-undo]').forEach(function (bt) {
       bt.addEventListener('click', function () {
         if (confirm('Cancel this entry? It stays in the log, marked as undone.')) {
-          addEvent('void', { target: bt.getAttribute('data-undo') }); render();
+          undo(bt.getAttribute('data-undo')); render();
         }
       });
     });
@@ -539,7 +682,7 @@
     var h = (location.hash || '#home').slice(1).split('/');
     var fn = screens[h[0]] || screens.home;
     var keepMonth = current.month;
-    current = fn(h[1] ? decodeURIComponent(h[1]) : undefined) || {};
+    current = fn(h[1] ? decodeURIComponent(h[1]) : undefined, h[2] ? decodeURIComponent(h[2]) : undefined) || {};
     if (keepMonth && !current.month) current.month = keepMonth;
     window.scrollTo(0, 0);
     paintSync();
@@ -550,16 +693,26 @@
     navigator.serviceWorker.register('sw.js').catch(function () {});
   }
 
-  // Stock screens live in stock.js and share these helpers.
-  if (window.CBStock) {
-    window.CBStock({
-      screens: screens, app: app, esc: esc, go: go, $: $, $$: $$, wireGo: wireGo, setHeader: setHeader,
-      state: state, addEvent: addEvent, today: today, LS: LS, render: function () { render(); }, role: role,
-      items: function () { return LS.get('cb.items', []); },
-      allEvents: function () { return serverEvents.concat(pending); },
-      isPending: function (id) { return pending.some(function (p) { return p.id === id; }); },
+  // Stock screens live in stock.js, brew day in brew.js; both share these helpers.
+  // Items = the Sheet's Items tab, plus any added on the phone that the Sheet hasn't listed yet.
+  function items() {
+    var list = LS.get('cb.items', []), have = {};
+    list.forEach(function (it) { have[it.id] = true; });
+    state().newItems.forEach(function (it) {
+      if (!have[it.id]) { have[it.id] = true; list.push(it); }
     });
+    return list;
   }
+  var shared = {
+    screens: screens, app: app, esc: esc, go: go, $: $, $$: $$, wireGo: wireGo, setHeader: setHeader,
+    state: state, addEvent: addEvent, today: today, LS: LS, render: function () { render(); }, role: role,
+    items: items, seg: seg, wireSegs: wireSegs,
+    allEvents: function () { return serverEvents.concat(pending); },
+    isPending: function (id) { return pending.some(function (p) { return p.id === id; }); },
+  };
+  Object.keys(shared).forEach(function (k) { api[k] = shared[k]; });
+  if (window.CBStock) window.CBStock(api);
+  if (window.CBBrew) window.CBBrew(api);
 
   render();
   sync();

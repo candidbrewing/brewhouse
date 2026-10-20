@@ -36,7 +36,7 @@ window.CBStock = function (api) {
     function addBeers() {
       var g = group(bs.spot);
       CB.beerNames(s).forEach(function (beer) {
-        bs.formats.forEach(function (fk) {
+        (area === 'brewery' ? bs.formats : CB.retailFormats(beer)).forEach(function (fk) {
           var f = fmt(fk);
           g.lines.push({ id: CB.beerItemId(beer, fk), name: beer + ' — ' + f.label, beer: beer, fmt: fk,
             unit: f.unit, pack: f.pack || 0, packName: f.packName || '', spot: bs.spot });
@@ -92,6 +92,8 @@ window.CBStock = function (api) {
     }).join('') +
       '<div class="row-btns"><button class="big alt" data-go="#giveaway">Give away / write off</button>' +
       '<button class="big alt" data-go="#movestock">Move stock</button></div>' +
+      (api.role() === 'brewer' ? '<div class="row-btns"><button class="big alt" data-go="#stocknow">Stock on hand</button>' +
+        '<button class="big alt" data-go="#receive">Add to stock</button></div>' : '') +
       '<button class="big alt" data-go="#stockrecent">Recent stock entries</button>' +
       (api.role() === 'brewer' ? '' : '<button class="big alt" data-go="#settings">Settings</button>');
     api.wireGo();
