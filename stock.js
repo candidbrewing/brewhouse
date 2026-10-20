@@ -48,7 +48,7 @@ window.CBStock = function (api) {
       .sort(function (a, b) { return a.order - b.order; })
       .forEach(function (it) {
         group(it.spot).lines.push({ id: it.id, name: it.name, unit: it.unit, pack: it.pack, packName: it.packName,
-          notes: it.notes, spot: it.spot });
+          notes: it.notes, spot: it.spot, weigh: weighable(it) ? it : null });
       });
     if (area === 'brewery') {
       var g = group('Beer in tanks');
@@ -61,11 +61,20 @@ window.CBStock = function (api) {
     return groups;
   }
 
+  // Spirits are counted as full bottles plus each open bottle's weight (Louise, Oct 20: weekly, from end of October).
+  var WEIGH_SPOTS = ['Spirits shelf'];
+  function weighable(it) { return WEIGH_SPOTS.indexOf(it.spot) >= 0; }
+
   function draftKey(area) { return 'cb.draft.' + area; }
   function loadDraft(area) { return api.LS.get(draftKey(area), { date: api.today(), v: {} }); }
   function saveDraft(area, d) { api.LS.set(draftKey(area), d); }
   function lineQty(line, v) {
     if (!v) return null;
+    if (line.weigh) {
+      var g = (v.g || []).filter(function (x) { return x !== '' && x != null; });
+      if ((v.f == null || v.f === '') && !g.length) return null;
+      return CB.bottleQty(v.f, g, CB.bottleWeights(api.state(), line.weigh)); // null = weights missing
+    }
     if (line.pack) {
       if (v.p === '' && v.l === '') return null;
       return n(v.p) * line.pack + n(v.l);
@@ -94,6 +103,8 @@ window.CBStock = function (api) {
       '<button class="big alt" data-go="#movestock">Move stock</button></div>' +
       (api.role() === 'brewer' ? '<div class="row-btns"><button class="big alt" data-go="#stocknow">Stock on hand</button>' +
         '<button class="big alt" data-go="#receive">Add to stock</button></div>' : '') +
+      (areas.indexOf('taproom') >= 0 ? '<button class="big alt" data-go="#bottles">Bottle weights (spirits)</button>' : '') +
+      (api.role() === 'brewer' ? '<button class="big alt" data-go="#kegs">Kegs out at customers</button>' : '') +
       '<button class="big alt" data-go="#stockrecent">Recent stock entries</button>' +
       (api.role() === 'brewer' ? '' : '<button class="big alt" data-go="#settings">Settings</button>');
     api.wireGo();
@@ -109,9 +120,24 @@ window.CBStock = function (api) {
     var total = 0;
     groups.forEach(function (g) { total += g.lines.length; });
 
+    function weighHtml(l, v, prevTxt) {
+      var w = CB.bottleWeights(api.state(), l.weigh), g = (v.g && v.g.length ? v.g : ['']);
+      var q = lineQty(l, v);
+      return '<div class="sline" data-line="' + esc(l.id) + '" style="grid-template-columns:1fr 170px"><div class="sname">' + esc(l.name) +
+        '<small>' + [prevTxt, w ? 'empty ' + w.emptyG + ' g, full ' + w.fullG + ' g' : '<a href="#bottles">set bottle weights</a>'].filter(Boolean).join(' · ') +
+        '</small><small data-calc="' + esc(l.id) + '" style="color:var(--ink);font-weight:600">' + (q != null ? '= ' + show(q) + ' bottles' : (v.g || []).some(function (x) { return x !== '' && x != null; }) ? 'needs bottle weights' : '') + '</small></div>' +
+        '<div class="sin two"><input inputmode="decimal" data-id="' + esc(l.id) + '" data-part="f" value="' + esc(v.f == null ? '' : v.f) + '" placeholder="full">' +
+        g.map(function (x, i) {
+          return '<input inputmode="decimal" data-id="' + esc(l.id) + '" data-part="g" data-i="' + i + '" value="' + esc(x) + '" placeholder="open g"' +
+            (i ? ' style="grid-column:2"' : '') + '>';
+        }).join('') +
+        '<a href="#" data-more="' + esc(l.id) + '" style="grid-column:1 / -1;font-size:14px;text-align:right">+ another open bottle</a></div></div>';
+    }
+
     function lineHtml(l) {
       var v = d.v[l.id] || {}, prev = last[l.id];
       var prevTxt = prev ? 'last: ' + show(prev.qty) + ' ' + esc(l.unit) : (l.hint ? esc(l.hint) : '');
+      if (l.weigh) return weighHtml(l, v, prevTxt);
       var inputs = l.pack
         ? '<input inputmode="decimal" data-id="' + esc(l.id) + '" data-part="p" value="' + esc(v.p == null ? '' : v.p) + '" placeholder="' + esc(l.packName) + '">' +
           '<input inputmode="decimal" data-id="' + esc(l.id) + '" data-part="l" value="' + esc(v.l == null ? '' : v.l) + '" placeholder="loose">'
@@ -144,10 +170,28 @@ window.CBStock = function (api) {
         inp.value = inp.value.replace(/[^0-9.]/g, '');
         var id = inp.getAttribute('data-id'), part = inp.getAttribute('data-part');
         var v = d.v[id] || {};
-        v[part] = inp.value;
-        if ((v.q == null || v.q === '') && (v.p == null || v.p === '') && (v.l == null || v.l === '')) delete d.v[id];
+        if (part === 'g') { v.g = v.g || []; v.g[+inp.getAttribute('data-i')] = inp.value; }
+        else v[part] = inp.value;
+        var gs = (v.g || []).filter(function (x) { return x !== '' && x != null; });
+        if ((v.q == null || v.q === '') && (v.p == null || v.p === '') && (v.l == null || v.l === '') &&
+          (v.f == null || v.f === '') && !gs.length) delete d.v[id];
         else d.v[id] = v;
         saveDraft(area, d); progress();
+        var calc = $('[data-calc="' + id + '"]');
+        if (calc) {
+          var line = null;
+          groups.forEach(function (g) { g.lines.forEach(function (l) { if (l.id === id) line = l; }); });
+          var q = line && d.v[id] ? lineQty(line, d.v[id]) : null;
+          calc.textContent = q != null ? '= ' + show(q) + ' bottles' : (d.v[id] ? 'needs bottle weights' : '');
+        }
+      });
+    });
+    $$('[data-more]').forEach(function (b) {
+      b.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        var id = b.getAttribute('data-more'), v = d.v[id] || (d.v[id] = {});
+        v.g = (v.g && v.g.length ? v.g : ['']).concat(['']);
+        saveDraft(area, d); api.render();
       });
     });
     $('#cdate').addEventListener('change', function (e) { d.date = e.target.value; saveDraft(area, d); });
@@ -162,13 +206,25 @@ window.CBStock = function (api) {
       if (confirm('Clear everything typed in this count?')) { api.LS.set(draftKey(area), null); api.render(); }
     });
     $('#submit').addEventListener('click', function () {
-      var lines = [];
+      var lines = [], noWeights = [];
       groups.forEach(function (g) {
         g.lines.forEach(function (l) {
-          var q = lineQty(l, d.v[l.id]);
-          if (q != null) lines.push({ item: l.id, name: l.name, spot: g.spot, qty: q, unit: l.unit });
+          var v = d.v[l.id], q = lineQty(l, v);
+          if (q == null && l.weigh && v) { noWeights.push(l.name); return; }
+          if (q == null) return;
+          var line = { item: l.id, name: l.name, spot: g.spot, qty: q, unit: l.unit };
+          if (l.weigh) { // keep what was typed, so the weighing can be checked later
+            line.full = n(v.f); line.openG = (v.g || []).filter(function (x) { return x !== '' && x != null; }).map(n);
+            var w = CB.bottleWeights(api.state(), l.weigh); if (w) { line.emptyG = w.emptyG; line.fullG = w.fullG; }
+          }
+          lines.push(line);
         });
       });
+      if (noWeights.length) {
+        $('#msg').innerHTML = '<div class="err">Open bottles were weighed but these have no bottle weights yet: ' + noWeights.map(esc).join(', ') +
+          '. Tap <a href="#bottles">Bottle weights</a> first (your count is kept).</div>';
+        return;
+      }
       if (!lines.length) { $('#msg').innerHTML = '<div class="err">Nothing has been counted yet.</div>'; return; }
       if (!d.date || d.date > api.today()) { $('#msg').innerHTML = '<div class="err">Pick the count date.</div>'; return; }
       var missing = total - lines.length;
@@ -297,6 +353,8 @@ window.CBStock = function (api) {
     if (e.type === 'count') return CB.AREAS[d.area].label + ' count, ' + (d.lines || []).length + ' lines';
     if (e.type === 'adjust') return d.reason + ': ' + show(d.qty) + ' ' + d.unit + ' ' + d.name;
     if (e.type === 'move') return 'Moved ' + show(d.qty) + ' ' + d.unit + ' ' + d.name + ', ' + d.from + ' → ' + d.to;
+    if (e.type === 'bottle') return 'Bottle weights: ' + d.name + ', empty ' + d.emptyG + ' g, full ' + d.fullG + ' g';
+    if (e.type === 'keg_out' || e.type === 'keg_back') return (e.type === 'keg_out' ? 'Kegs delivered to ' : 'Kegs picked up from ') + d.customer + ': ' + kegText(d);
     return e.type;
   }
 
@@ -316,9 +374,121 @@ window.CBStock = function (api) {
     return { refreshOnSync: true };
   };
 
+  var STOCK_LIST = { count: 1, adjust: 1, move: 1, bottle: 1, keg_out: 1, keg_back: 1 };
+  var KEG_LABEL = { k20: '20 L', k50: '50 L', k58: '58.6 L' };
+  function kegText(d) {
+    var parts = CB.KEG_KEYS.filter(function (k) { return n(d[k]); }).map(function (k) { return n(d[k]) + ' × ' + KEG_LABEL[k]; });
+    return parts.join(', ') || 'none';
+  }
+
+  // ---------- bottle weights (spirits) ----------
+  screens.bottles = function () {
+    api.setHeader('Bottle weights', true);
+    var s = api.state();
+    var list = api.items().filter(function (it) { return it.area === 'taproom' && weighable(it); })
+      .sort(function (a, b) { return a.order - b.order; });
+    api.app.innerHTML =
+      '<div class="card"><b>Do this once for each spirit</b>, and again if the brand or bottle changes.' +
+      '<ol style="margin:8px 0 0 20px;padding:0"><li>Weigh a <b>full, sealed</b> bottle.</li>' +
+      '<li>Weigh an <b>empty</b> one, rinsed and dry, with the same pourer on it.</li>' +
+      '<li>On the count, weigh each open bottle <b>with its pourer on</b>.</li></ol>' +
+      '<p class="muted" style="margin-bottom:0">Grams, from the bar scale.</p></div>' +
+      (list.length ? list.map(function (it) {
+        var w = CB.bottleWeights(s, it) || {};
+        return '<div class="card"><div class="sname">' + esc(it.name) + '</div><div class="g2">' +
+          '<div><label class="f">Empty g</label><input inputmode="decimal" data-w="' + esc(it.id) + '" data-k="emptyG" value="' + esc(w.emptyG || '') + '"></div>' +
+          '<div><label class="f">Full g</label><input inputmode="decimal" data-w="' + esc(it.id) + '" data-k="fullG" value="' + esc(w.fullG || '') + '"></div>' +
+          '</div></div>';
+      }).join('') : '<p class="muted">No spirits on the taproom list.</p>') +
+      '<div id="msg"></div><button class="big" id="save">Save weights</button>';
+    $('#save').addEventListener('click', function () {
+      var errs = [], saves = [];
+      list.forEach(function (it) {
+        var e = $('[data-w="' + it.id + '"][data-k="emptyG"]').value.trim(), f = $('[data-w="' + it.id + '"][data-k="fullG"]').value.trim();
+        if (e === '' && f === '') return;
+        var old = CB.bottleWeights(s, it) || {};
+        if (n(e) === old.emptyG && n(f) === old.fullG) return;
+        if (!(n(e) > 0) || !(n(f) > n(e))) { errs.push(it.name + ': full must be heavier than empty.'); return; }
+        saves.push({ area: 'taproom', item: it.id, name: it.name, emptyG: n(e), fullG: n(f), date: api.today() });
+      });
+      if (errs.length) { $('#msg').innerHTML = '<div class="err">' + errs.map(esc).join('<br>') + '</div>'; return; }
+      if (!saves.length) { $('#msg').innerHTML = '<div class="warn">Nothing changed.</div>'; return; }
+      var last;
+      saves.forEach(function (x) { last = api.addEvent('bottle', x); });
+      go('#stocksaved/' + last.id);
+    });
+    return {};
+  };
+
+  // ---------- kegs out at customers ----------
+  // Deliveries come from the invoices (Material Flows' weekly pass); Bryan logs pickups, and any delivery with no invoice.
+  screens.kegs = function () {
+    api.setHeader('Kegs out', true);
+    var s = api.state(), bal = CB.kegBalances(s), tot = { k20: 0, k50: 0, k58: 0 };
+    bal.forEach(function (c) { CB.KEG_KEYS.forEach(function (k) { tot[k] += c[k]; }); });
+    api.app.innerHTML =
+      '<div class="sum"><div class="grid">' + CB.KEG_KEYS.map(function (k) {
+        return '<div><div class="n">' + tot[k] + '</div><div class="l">' + KEG_LABEL[k] + ' out</div></div>';
+      }).join('') + '</div></div>' +
+      '<div class="row-btns"><button class="big" data-go="#kegmove/back">Picked up empties</button>' +
+      '<button class="big alt" data-go="#kegmove/out">Delivered</button></div>' +
+      (bal.length ? '<div class="card">' + bal.map(function (c) {
+        var days = c.since ? CB.daysBetween(c.since, api.today()) : null;
+        return '<div class="list-item"><div><b>' + esc(c.customer) + '</b><br><span class="muted">' + kegText(c) +
+          (days != null ? ' · out since ' + esc(c.since) + ' (' + days + ' days)' : '') + '</span></div>' +
+          '<button class="small-btn" data-go="#kegmove/back/' + encodeURIComponent(c.customer) + '">Pickup</button></div>';
+      }).join('') + '</div>' : '<p class="muted">No kegs out on record.</p>') +
+      '<p class="muted">Deliveries are added from the invoices each week. Log a delivery here only if there’s no invoice (a loaner, an event).</p>';
+    api.wireGo();
+    return { refreshOnSync: true };
+  };
+
+  screens.kegmove = function (kind, who) {
+    var out = kind === 'out';
+    api.setHeader(out ? 'Kegs delivered' : 'Empties picked up', true);
+    var s = api.state(), names = Object.keys(s.kegsOut).map(function (k) { return s.kegsOut[k].customer; }).sort();
+    api.app.innerHTML =
+      '<label class="f">Customer</label><input id="cust" list="custs" value="' + esc(who || '') + '" autocomplete="off">' +
+      '<datalist id="custs">' + names.map(function (x) { return '<option value="' + esc(x) + '">'; }).join('') + '</datalist>' +
+      CB.KEG_KEYS.map(function (k) {
+        return '<div class="count"><div class="lbl">' + KEG_LABEL[k] + '</div><button data-dn="' + k + '">−</button>' +
+          '<input inputmode="numeric" id="' + k + '" value="0"><button data-up="' + k + '">+</button></div>';
+      }).join('') +
+      (out ? '<label class="f">Why no invoice? (loaner, event…)</label><input id="note">'
+        : '<label class="f">Note (optional)</label><input id="note">') +
+      '<label class="f">Date</label><input type="date" id="date" value="' + api.today() + '" max="' + api.today() + '">' +
+      '<div id="msg"></div><button class="big" id="save" style="margin-top:18px">Save</button>';
+    CB.KEG_KEYS.forEach(function (k) {
+      $('[data-up="' + k + '"]').addEventListener('click', function () { $('#' + k).value = n($('#' + k).value) + 1; });
+      $('[data-dn="' + k + '"]').addEventListener('click', function () { $('#' + k).value = Math.max(0, n($('#' + k).value) - 1); });
+    });
+    $('#save').addEventListener('click', function () {
+      var d = { customer: $('#cust').value.trim(), note: $('#note').value.trim(), date: $('#date').value }, errs = [];
+      CB.KEG_KEYS.forEach(function (k) { d[k] = Math.max(0, Math.round(n($('#' + k).value))); });
+      if (!d.customer) errs.push('Who is it?');
+      if (!(d.k20 + d.k50 + d.k58)) errs.push('Enter how many kegs.');
+      if (out && !d.note) errs.push('Say why there’s no invoice.');
+      if (!out) {
+        var c = s.kegsOut[d.customer.toLowerCase()];
+        CB.KEG_KEYS.forEach(function (k) {
+          if (d[k] > (c ? c[k] : 0)) errs.push('The app shows ' + (c ? c[k] : 0) + ' × ' + KEG_LABEL[k] + ' at ' + d.customer + '. Saving anyway will show a minus until the delivery is added.');
+        });
+        if (errs.length && errs.every(function (x) { return x.indexOf('The app shows') === 0; }) && !$('#msg').dataset.warned) {
+          $('#msg').dataset.warned = '1';
+          $('#msg').innerHTML = '<div class="warn">' + errs.map(esc).join('<br>') + '<br>Tap Save again to keep it.</div>'; return;
+        }
+        errs = errs.filter(function (x) { return x.indexOf('The app shows') !== 0; });
+      }
+      if (errs.length) { $('#msg').innerHTML = '<div class="err">' + errs.map(esc).join('<br>') + '</div>'; return; }
+      var e = api.addEvent(out ? 'keg_out' : 'keg_back', d);
+      go('#stocksaved/' + e.id);
+    });
+    return {};
+  };
+
   screens.stockrecent = function () {
     api.setHeader('Recent stock entries', true);
-    var list = api.state().events.filter(function (e) { return e.type === 'count' || e.type === 'adjust' || e.type === 'move'; }).slice(-30).reverse();
+    var list = api.state().events.filter(function (e) { return STOCK_LIST[e.type]; }).slice(-30).reverse();
     api.app.innerHTML = list.length ? '<div class="card">' + list.map(function (e) {
       return '<div class="list-item"><div>' + esc(describe(e)) + '<br><span class="muted">' + esc((e.data && e.data.date) || '') +
         (e.by ? ' · ' + esc(e.by) : '') + (api.isPending(e.id) ? ' · <b>waiting to send</b>' : '') +

@@ -98,6 +98,7 @@ var CB = (function () {
     var brews = [], uses = [], receives = [], readings = [], newItems = [];
     var plans = {};
     var dumps = [];
+    var kegsOut = {}, kegMoves = [], bottles = {}, sales = [];
     var live = [];
 
     function get(id) {
@@ -240,6 +241,31 @@ var CB = (function () {
             unit: d.unit || '', from: d.from, to: d.to, by: e.by || '', at: e.at });
           break;
 
+        case 'keg_out': // full kegs delivered to a customer (from an invoice, or logged by Bryan)
+        case 'keg_back': // empties picked up
+          var who = String(d.customer || '').trim();
+          if (!who) break;
+          var kc = kegsOut[who.toLowerCase()] || (kegsOut[who.toLowerCase()] = { customer: who, k20: 0, k50: 0, k58: 0, since: '', lastOut: '', lastBack: '' });
+          var sign = e.type === 'keg_out' ? 1 : -1, before = kc.k20 + kc.k50 + kc.k58;
+          KEG_KEYS.forEach(function (k) { kc[k] += sign * num(d[k]); });
+          var after = kc.k20 + kc.k50 + kc.k58;
+          if (e.type === 'keg_out') { kc.lastOut = d.date; if (before <= 0 && after > 0) kc.since = d.date; }
+          else { kc.lastBack = d.date; if (after <= 0) kc.since = ''; }
+          kegMoves.push({ id: e.id, date: d.date, customer: who, type: e.type, k20: num(d.k20), k50: num(d.k50), k58: num(d.k58),
+            invoice: d.invoice || '', note: d.note || '', by: e.by || '', at: e.at });
+          break;
+
+        case 'sale': // finished beer sold out of the walk-in: from invoices, Shopify, Clover boxes (Material Flows' weekly pass)
+          (d.lines || []).forEach(function (l) {
+            sales.push({ id: e.id, date: d.date, at: e.at, channel: d.channel || '', ref: d.ref || '', customer: d.customer || '',
+              beer: l.beer, fmt: l.fmt, item: beerItemId(l.beer, l.fmt), qty: num(l.qty), note: l.note || '' });
+          });
+          break;
+
+        case 'bottle': // a bottle's full and empty weight, for weighing open bottles on a count
+          if (d.item) bottles[d.item] = { emptyG: num(d.emptyG), fullG: num(d.fullG), date: d.date || '', by: e.by || '' };
+          break;
+
         case 'combine': // d.from poured into d.into
           var from = get(d.from), into = get(d.into);
           var moved = num(d.volumeHL);
@@ -257,7 +283,79 @@ var CB = (function () {
     Object.keys(plans).forEach(function (k) { plans[k].beer = (batches[plans[k].batch] || {}).beer || ''; });
     return { batches: batches, packaging: packaging, dumps: dumps, events: live, voided: voided,
       counts: counts, adjusts: adjusts, moves: moves,
-      brews: brews, uses: uses, receives: receives, readings: readings, plans: plans, newItems: newItems };
+      brews: brews, uses: uses, receives: receives, readings: readings, plans: plans, newItems: newItems,
+      kegsOut: kegsOut, kegMoves: kegMoves, bottles: bottles, sales: sales };
+  }
+
+  // ---------- finished beer in the walk-in ----------
+  // On hand = Bryan's last count + packaged since − sold since − moved out since + moved in since − written off since.
+  var WALKIN = 'Walk-in cooler';
+  function walkIn(state) {
+    var out = {};
+    function key(date, at) { return String(date || '') + '|' + String(at || ''); }
+    function get(beer, fmt) {
+      var id = beerItemId(beer, fmt);
+      return out[id] || (out[id] = { id: id, beer: beer, fmt: fmt, counted: null, countKey: '', base: 0,
+        packaged: 0, sold: 0, movedOut: 0, movedIn: 0, adjusted: 0, onHand: 0 });
+    }
+    function parse(id) { var p = String(id).split(':'); return p[0] === 'beer' && p.length === 3 ? { beer: p[1], fmt: p[2] } : null; }
+    (state.counts || []).forEach(function (c) {
+      var b = c.area === 'brewery' && parse(c.item); if (!b) return;
+      var o = get(b.beer, b.fmt), k = key(c.date, c.at);
+      if (!o.counted || k > o.countKey) { o.counted = c.date; o.countKey = k; o.base = c.qty; }
+    });
+    function after(o, date, at) { return !o.counted || key(date, at) > o.countKey; }
+    (state.packaging || []).forEach(function (r) {
+      if (!r.beer) return;
+      ['c355', 'c473', 'k20', 'k50', 'k58'].forEach(function (f) {
+        if (!r[f]) return;
+        var o = get(r.beer, f); if (after(o, r.date, r.at)) o.packaged += r[f];
+      });
+    });
+    (state.sales || []).forEach(function (s) {
+      if (!s.beer || !s.fmt) return;
+      var o = get(s.beer, s.fmt); if (after(o, s.date, s.at)) o.sold += s.qty;
+    });
+    (state.moves || []).forEach(function (m) {
+      var b = parse(m.item); if (!b) return;
+      var o = get(b.beer, b.fmt); if (!after(o, m.date, m.at)) return;
+      if (m.from === WALKIN) o.movedOut += m.qty;
+      if (m.to === WALKIN) o.movedIn += m.qty;
+    });
+    (state.adjusts || []).forEach(function (a) {
+      var b = a.area === 'brewery' && parse(a.item); if (!b) return;
+      var o = get(b.beer, b.fmt); if (after(o, a.date, a.at)) o.adjusted += a.qty;
+    });
+    Object.keys(out).forEach(function (k) {
+      var o = out[k]; o.onHand = round(o.base + o.packaged - o.sold - o.movedOut + o.movedIn - o.adjusted, 4);
+    });
+    return out;
+  }
+
+  // ---------- kegs at customers ----------
+  var KEG_KEYS = ['k20', 'k50', 'k58'];
+  // Customers still holding kegs, longest out first.
+  function kegBalances(state) {
+    return Object.keys(state.kegsOut || {}).map(function (k) { return state.kegsOut[k]; })
+      .filter(function (c) { return c.k20 || c.k50 || c.k58; })
+      .sort(function (a, b) { return (a.since || '9') < (b.since || '9') ? -1 : 1; });
+  }
+
+  // ---------- spirits by weight ----------
+  // Bottle weights for an item: set on the phone (latest wins), else the Items tab's Empty g / Full g.
+  function bottleWeights(state, item) {
+    var w = (state.bottles || {})[item.id];
+    if (w && w.fullG > w.emptyG) return w;
+    if (item.fullG > item.emptyG && item.emptyG > 0) return { emptyG: item.emptyG, fullG: item.fullG };
+    return null;
+  }
+  // Full bottles + each open bottle's weight -> bottles, e.g. 2 full + 640 g (empty 500, full 1,250) = 2.19.
+  // null when an open bottle is weighed but the item has no weights yet (never guessed).
+  function bottleQty(full, grams, w) {
+    var q = num(full), open = (grams || []).filter(function (g) { return g !== '' && g != null; });
+    if (open.length && !w) return null;
+    open.forEach(function (g) { q += Math.min(1, Math.max(0, (num(g) - w.emptyG) / (w.fullG - w.emptyG))); });
+    return round(q, 2);
   }
 
   // ---------- running stock ----------
@@ -399,6 +497,7 @@ var CB = (function () {
     beerItemId: beerItemId, beerNames: beerNames, lastCounts: lastCounts, retailFormats: retailFormats,
     UNIT_FAMILY: UNIT_FAMILY, entryUnits: entryUnits, toStockUnit: toStockUnit, brewLines: brewLines, STEPS: STEPS,
     stockLevels: stockLevels, lastBrewOf: lastBrewOf, openPlans: openPlans, addDays: addDays, daysBetween: daysBetween,
+    KEG_KEYS: KEG_KEYS, kegBalances: kegBalances, bottleWeights: bottleWeights, bottleQty: bottleQty, walkIn: walkIn,
   };
 })();
 

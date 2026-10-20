@@ -1,6 +1,6 @@
 // Keeps the app's own files on the phone so it opens with no wifi.
 // Bump VERSION whenever app files change so phones pick up the new copy.
-var VERSION = 'cb-v7';
+var VERSION = 'cb-v8';
 var FILES = ['./', 'index.html', 'app.js', 'core.js', 'stock.js', 'brew.js', 'manifest.webmanifest', 'icon-180.png', 'icon-512.png'];
 
 self.addEventListener('install', function (e) {

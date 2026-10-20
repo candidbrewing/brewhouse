@@ -188,7 +188,8 @@
     app.innerHTML =
       '<button class="big" data-go="#pack">Packaging day</button>' +
       '<button class="big" data-go="#brew">Brew day</button>' +
-      '<button class="big alt" data-go="#stock">Stock counts</button>' +
+      '<div class="row-btns"><button class="big alt" data-go="#stock">Stock counts</button>' +
+      '<button class="big alt" data-go="#kegs">Kegs out</button></div>' +
       (api.dueHtml ? api.dueHtml(s, 2) : '') +
       '<h2>In the tanks</h2>' +
       (open.length ? '<div class="tiles">' + open.map(function (b) { return batchTile(b, '#batch/' + b.batch); }).join('') + '</div>'
@@ -601,6 +602,10 @@
       case 'plan_done': var p = s.plans[d.plan]; return 'Done: ' + (p ? p.step + ' ' + p.batch : 'a planned step');
       case 'receive': return 'Added to stock: ' + d.name + ' ' + d.qty + ' ' + d.unit + (d.supplier ? ' from ' + d.supplier : '');
       case 'item_new': return 'New item on the list: ' + (d.item ? d.item.name : '');
+      case 'sale': return 'Sold (' + (d.channel || '') + (d.ref ? ' ' + d.ref : '') + '): ' + (d.lines || []).map(function (l) { return l.qty + ' ' + l.beer + ' ' + l.fmt; }).join(', ');
+      case 'bottle': return 'Bottle weights: ' + d.name + ' ' + d.emptyG + ' / ' + d.fullG + ' g';
+      case 'keg_out': case 'keg_back': return (e.type === 'keg_out' ? 'Kegs delivered to ' : 'Kegs picked up from ') + d.customer + ': ' +
+        CB.KEG_KEYS.filter(function (k) { return +d[k]; }).map(function (k) { return d[k] + ' × ' + { k20: '20 L', k50: '50 L', k58: '58.6 L' }[k]; }).join(', ');
       case 'count': case 'adjust': case 'move': return e.type === 'count' ? 'Stock count, ' + (d.lines || []).length + ' lines' : e.type === 'adjust' ? d.reason + ': ' + d.qty + ' ' + d.name : 'Moved ' + d.qty + ' ' + d.name;
       default: return e.type;
     }

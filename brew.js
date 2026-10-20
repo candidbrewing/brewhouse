@@ -536,7 +536,25 @@ window.CBBrew = function (api) {
             (o.unconverted ? ' · ' + o.unconverted + ' entries in other units not taken off' : '') +
             '</span></div><div style="text-align:right;font-weight:700;white-space:nowrap">' + esc(onHandText(o)) + '</div></div>';
         }).join('') + '</div>';
-      }).join('');
+      }).join('') + walkInHtml();
     return { refreshOnSync: true };
   };
+
+  // Finished beer in the walk-in: Bryan's count + packaging runs − sales (added weekly from invoices, Shopify, Clover) − moves.
+  function walkInHtml() {
+    var wi = CB.walkIn(api.state()), rows = Object.keys(wi).map(function (k) { return wi[k]; })
+      .filter(function (o) { return o.counted || o.onHand; })
+      .sort(function (a, b) { return a.beer < b.beer ? -1 : a.beer > b.beer ? 1 : a.fmt < b.fmt ? -1 : 1; });
+    var label = {}; CB.BEER_FORMATS.forEach(function (f) { label[f.key] = f; });
+    return '<h2>Beer in the walk-in</h2>' + (rows.length ? '<div class="card">' + rows.map(function (o) {
+      var f = label[o.fmt] || { label: o.fmt, unit: '' };
+      var flats = f.pack ? ' (' + show(Math.floor(o.onHand / f.pack)) + ' flats + ' + show(o.onHand % f.pack) + ')' : '';
+      return '<div class="list-item"><div>' + esc(o.beer) + ' — ' + esc(f.label) + '<br><span class="muted" style="font-size:14px">' +
+        (o.counted ? 'counted ' + prettyDate(o.counted) + ': ' + show(o.base) : 'not counted yet') +
+        (o.packaged ? ' · +' + show(o.packaged) + ' packaged' : '') + (o.sold ? ' · −' + show(o.sold) + ' sold' : '') +
+        (o.movedOut ? ' · −' + show(o.movedOut) + ' moved out' : '') + (o.movedIn ? ' · +' + show(o.movedIn) + ' moved in' : '') +
+        (o.adjusted ? ' · −' + show(o.adjusted) + ' written off' : '') +
+        '</span></div><div style="text-align:right;font-weight:700;white-space:nowrap">' + show(o.onHand) + ' ' + esc(f.unit) + flats + '</div></div>';
+    }).join('') + '</div>' : '<p class="muted">Nothing yet. It starts from Bryan’s next walk-in count.</p>');
+  }
 };
