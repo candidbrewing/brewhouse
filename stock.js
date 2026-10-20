@@ -10,6 +10,7 @@ window.CBStock = function (api) {
     'Walk-in cooler': 'brewery',
     'Retail fridge': 'taproom',
     'Market': 'market',
+    'On tap (taproom)': 'taproom', // a full keg put on the taproom taps (Louise, Oct 20: try it and see)
   };
   // Where beer is counted in each area, and which formats.
   var BEER_SPOTS = {
@@ -101,6 +102,7 @@ window.CBStock = function (api) {
     }).join('') +
       '<div class="row-btns"><button class="big alt" data-go="#giveaway">Give away / write off</button>' +
       '<button class="big alt" data-go="#movestock">Move stock</button></div>' +
+      (areas.indexOf('taproom') >= 0 ? '<button class="big alt" data-go="#movestock/tap">Keg on tap</button>' : '') +
       (api.role() === 'brewer' ? '<div class="row-btns"><button class="big alt" data-go="#stocknow">Stock on hand</button>' +
         '<button class="big alt" data-go="#receive">Add to stock</button></div>' : '') +
       (areas.indexOf('taproom') >= 0 ? '<button class="big alt" data-go="#bottles">Bottle weights (spirits)</button>' : '') +
@@ -311,14 +313,16 @@ window.CBStock = function (api) {
   };
 
   // ---------- move stock (beer between walk-in, retail fridge, market) ----------
-  screens.movestock = function () {
-    api.setHeader('Move stock', true);
+  // "#movestock/tap" = a full keg from the walk-in onto the taproom taps.
+  screens.movestock = function (preset) {
+    var tap = preset === 'tap';
+    api.setHeader(tap ? 'Keg on tap' : 'Move stock', true);
     var roleAreas = areasFor(api.role());
     var places = Object.keys(PLACES);
-    var f = { item: null, from: 'Walk-in cooler', to: 'Retail fridge' };
+    var f = { item: null, from: 'Walk-in cooler', to: tap ? 'On tap (taproom)' : 'Retail fridge' };
     var beers = [];
     CB.beerNames(api.state()).forEach(function (beer) {
-      ['c473', 'c355', 'k20', 'k50', 'k58'].forEach(function (fk) {
+      (tap ? ['k20', 'k50', 'k58'] : ['c473', 'c355', 'k20', 'k50', 'k58']).forEach(function (fk) {
         var fm = fmt(fk);
         beers.push({ id: CB.beerItemId(beer, fk), name: beer + ' — ' + fm.label, unit: fm.unit, area: 'brewery', spot: 'beer', pack: fm.pack });
       });
@@ -327,8 +331,9 @@ window.CBStock = function (api) {
       return '<select id="' + id + '">' + places.map(function (p) { return '<option' + (p === val ? ' selected' : '') + '>' + p + '</option>'; }).join('') + '</select>';
     }
     api.app.innerHTML = pickerHtml() +
-      '<label class="f">How many</label><div class="row-btns"><input id="packs" inputmode="decimal" placeholder="flats" style="flex:1 1 40%">' +
-      '<input id="loose" inputmode="decimal" placeholder="loose cans / kegs" style="flex:1 1 40%"></div>' +
+      (tap ? '<label class="f">How many kegs</label><input id="loose" inputmode="numeric" value="1"><input id="packs" type="hidden" value="">'
+        : '<label class="f">How many</label><div class="row-btns"><input id="packs" inputmode="decimal" placeholder="flats" style="flex:1 1 40%">' +
+          '<input id="loose" inputmode="decimal" placeholder="loose cans / kegs" style="flex:1 1 40%"></div>') +
       '<label class="f">From</label>' + sel('from', f.from) + '<label class="f">To</label>' + sel('to', f.to) +
       '<label class="f">Date</label><input type="date" id="date" value="' + api.today() + '" max="' + api.today() + '">' +
       '<div id="msg"></div><button class="big" id="save" style="margin-top:18px">Save move</button>';
